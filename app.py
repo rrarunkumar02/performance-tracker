@@ -326,6 +326,13 @@ def ensure_tracking_rows(member_id: int) -> None:
                         "week_name": week["name"],
                         "week_range": week["range"],
                         "task_name": task,
+                        "value_status": "",
+                        "conducted_by": "",
+                        "note_to_eye_on": "",
+                        "michael_mark": "",
+                        "shift_runner_mark": "",
+                        "weekly_progress": "",
+                        "overall_score": "",
                         "updated_at": timestamp,
                     }
                 )
