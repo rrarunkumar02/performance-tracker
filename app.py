@@ -8,6 +8,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
@@ -158,8 +159,20 @@ def supabase_request(
         headers["Prefer"] = prefer
 
     request = Request(url, data=body, headers=headers, method=method)
-    with urlopen(request, timeout=20) as response:
-        response_body = response.read().decode("utf-8")
+    try:
+        with urlopen(request, timeout=20) as response:
+            response_body = response.read().decode("utf-8")
+    except HTTPError as error:
+        details = error.read().decode("utf-8", errors="replace")
+        print(f"Supabase {method} {table} failed: {error.code} {details}")
+        raise RuntimeError(
+            f"Supabase {method} {table} failed: {error.code} {details}"
+        ) from error
+    except URLError as error:
+        print(f"Supabase {method} {table} connection failed: {error}")
+        raise RuntimeError(
+            f"Supabase {method} {table} connection failed: {error}"
+        ) from error
     if not response_body:
         return []
     return json.loads(response_body)
