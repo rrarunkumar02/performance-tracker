@@ -328,11 +328,6 @@ def ensure_tracking_rows(member_id: int) -> None:
                         "task_name": task,
                         "value_status": "",
                         "conducted_by": "",
-                        "note_to_eye_on": "",
-                        "michael_mark": "",
-                        "shift_runner_mark": "",
-                        "weekly_progress": "",
-                        "overall_score": "",
                         "updated_at": timestamp,
                     }
                 )
@@ -366,8 +361,7 @@ def get_tracking(member_id: int) -> dict[tuple[str, str], sqlite3.Row]:
             {
                 "select": (
                     "tracking_id,member_id,week_name,week_range,task_name,"
-                    "value_status,conducted_by,note_to_eye_on,michael_mark,"
-                    "shift_runner_mark,weekly_progress,overall_score,updated_at"
+                    "value_status,conducted_by,updated_at"
                 ),
                 "member_id": f"eq.{member_id}",
                 "order": "tracking_id.asc",
