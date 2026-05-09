@@ -336,7 +336,7 @@ def ensure_tracking_rows(member_id: int) -> None:
                         "updated_at": timestamp,
                     }
                 )
-        query = "on_conflict=member_id,week_name,task_name"
+        query = urlencode({"on_conflict": "member_id,week_name,task_name"})
         supabase_request(
             "POST",
             "member_tracking",
