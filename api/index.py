@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+import sys
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, unquote, urlparse

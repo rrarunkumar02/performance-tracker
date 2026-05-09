@@ -1,6 +1,6 @@
 # Team Member Training Tracker
 
-Python web app for adding team members and tracking Week 0 to Week 4 training progress.
+Python web app for adding team members and tracking Week 0 to Week 4 training progress-new person.
 
 ## Run on your computer
 
