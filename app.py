@@ -1049,4 +1049,6 @@ if __name__ == "__main__":
     main()
 
 
-handler = TeamTrackerHandler
+
+class handler(TeamTrackerHandler):
+    pass
