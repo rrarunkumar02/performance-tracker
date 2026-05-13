@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import html
 import json
 import os
@@ -20,6 +22,10 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get(
     "SUPABASE_KEY", ""
 )
+READ_PASSWORD = os.environ.get("READ_PASSWORD", "")
+WRITE_PASSWORD = os.environ.get("WRITE_PASSWORD", "")
+SESSION_SECRET = os.environ.get("SESSION_SECRET") or SUPABASE_KEY or "local-dev-session-secret"
+AUTH_COOKIE = "team_tracker_auth"
 
 
 WEEKS = [
@@ -133,6 +139,73 @@ def get_connection() -> sqlite3.Connection:
 
 def use_supabase() -> bool:
     return bool(SUPABASE_URL and SUPABASE_KEY)
+
+
+def auth_enabled() -> bool:
+    return bool(READ_PASSWORD or WRITE_PASSWORD)
+
+
+def sign_role(role: str) -> str:
+    return hmac.new(
+        SESSION_SECRET.encode("utf-8"), role.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+
+def make_auth_cookie(role: str) -> str:
+    return (
+        f"{AUTH_COOKIE}={role}:{sign_role(role)}; Path=/; HttpOnly; "
+        "Secure; SameSite=Lax; Max-Age=2592000"
+    )
+
+
+def clear_auth_cookie() -> str:
+    return f"{AUTH_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0"
+
+
+def parse_cookie_header(cookie_header: str) -> dict[str, str]:
+    cookies = {}
+    for item in cookie_header.split(";"):
+        if "=" not in item:
+            continue
+        key, value = item.strip().split("=", 1)
+        cookies[key] = value
+    return cookies
+
+
+def role_from_headers(headers: object) -> str:
+    if not auth_enabled():
+        return "write"
+
+    cookie_header = ""
+    if hasattr(headers, "get"):
+        cookie_header = headers.get("Cookie", "")
+    auth_cookie = parse_cookie_header(cookie_header).get(AUTH_COOKIE, "")
+    if ":" not in auth_cookie:
+        return ""
+
+    role, signature = auth_cookie.split(":", 1)
+    if role not in {"read", "write"}:
+        return ""
+    if not hmac.compare_digest(signature, sign_role(role)):
+        return ""
+    return role
+
+
+def role_from_password(password: str) -> str:
+    clean_password = password.strip()
+    if WRITE_PASSWORD and hmac.compare_digest(clean_password, WRITE_PASSWORD):
+        return "write"
+    if READ_PASSWORD and hmac.compare_digest(clean_password, READ_PASSWORD):
+        return "read"
+    return ""
+
+
+def can_read(role: str) -> bool:
+    return role in {"read", "write"}
+
+
+def can_write(role: str) -> bool:
+    return role == "write"
 
 
 def supabase_request(
@@ -652,6 +725,17 @@ def page(
                 background: #e9edf5;
             }}
 
+            .button.danger {{
+                color: #ffffff;
+                background: var(--danger);
+            }}
+
+            input:disabled, textarea:disabled {{
+                color: var(--ink);
+                background: #f3f4f6;
+                cursor: not-allowed;
+            }}
+
             button:hover, .button:hover, .menu a:hover {{
                 background: var(--primary-dark);
             }}
@@ -673,7 +757,7 @@ def page(
                 font-weight: 700;
             }}
 
-            input[type="text"], input[type="number"], textarea {{
+            input[type="text"], input[type="number"], input[type="password"], textarea {{
                 width: 100%;
                 border: 1px solid #b8c2d4;
                 border-radius: 6px;
@@ -682,7 +766,7 @@ def page(
                 background: #ffffff;
             }}
 
-            input[type="text"], input[type="number"] {{
+            input[type="text"], input[type="number"], input[type="password"] {{
                 min-height: 42px;
             }}
 
@@ -817,12 +901,38 @@ def page(
     return document.encode("utf-8")
 
 
-def home_page() -> bytes:
+def login_page(message: str = "", message_type: str = "error") -> bytes:
     body = """
     <section class="panel">
+        <form method="post" action="/login">
+            <div class="form-row">
+                <div>
+                    <label for="password">Password</label>
+                    <input id="password" name="password" type="password" autofocus>
+                </div>
+                <button type="submit">Log In</button>
+            </div>
+        </form>
+    </section>
+    """
+    return page("Team Member Tracker Login", body, message, message_type)
+
+
+def home_page(can_write_access: bool = True) -> bytes:
+    new_member_link = (
+        '<a href="/new">1. New Member Entry</a>'
+        if can_write_access
+        else '<span class="button secondary">1. New Member Entry</span>'
+    )
+    readonly_message = "" if can_write_access else '<div class="message">Read-only access. You can view this tracker, but cannot save changes.</div>'
+    save_button = '<button type="submit">Save Tracking Data</button>' if can_write_access else ""
+    textarea_disabled = "" if can_write_access else " disabled"
+    body = f"""
+    <section class="panel">
+        {readonly_message}
         <p>Choose what you want to do.</p>
         <div class="menu">
-            <a href="/new">1. New Member Entry</a>
+            {new_member_link}
             <a href="/members">2. Existing Team Member</a>
         </div>
     </section>
@@ -884,7 +994,7 @@ def members_page() -> bytes:
     return page("Existing Team Member", body)
 
 
-def tracker_page(member_id: int, message: str = "") -> bytes:
+def tracker_page(member_id: int, message: str = "", can_write_access: bool = True) -> bytes:
     member = get_member(member_id)
     if member is None:
         return page(
@@ -905,15 +1015,16 @@ def tracker_page(member_id: int, message: str = "") -> bytes:
             value_input_type = "number" if task in NUMBER_VALUE_TASKS else "text"
             value_input_step = ' step="any"' if value_input_type == "number" else ""
             value_input_readonly = " readonly" if task == "Weekly Progress" else ""
+            disabled = " disabled" if not can_write_access else ""
             rows.append(
                 f"""
                 <tr>
                     <td class="task">{escape(task)}</td>
                     <td class="input-cell">
-                        <input type="{value_input_type}"{value_input_step}{value_input_readonly} name="{escape(value_name)}" value="{escape(record["value_status"])}">
+                        <input type="{value_input_type}"{value_input_step}{value_input_readonly}{disabled} name="{escape(value_name)}" value="{escape(record["value_status"])}">
                     </td>
                     <td class="input-cell">
-                        <input type="text" name="{escape(conducted_name)}" value="{escape(record["conducted_by"])}">
+                        <input type="text"{disabled} name="{escape(conducted_name)}" value="{escape(record["conducted_by"])}">
                     </td>
                 </tr>
                 """
@@ -942,13 +1053,13 @@ def tracker_page(member_id: int, message: str = "") -> bytes:
         <form method="post" action="/tracker/{escape(member_id)}">
             <div class="eye-on-area">
                 <label for="need_to_eye_on">Need to Eye On</label>
-                <textarea id="need_to_eye_on" class="eye-on-input" name="need_to_eye_on">{escape(member["need_to_eye_on"])}</textarea>
+                <textarea id="need_to_eye_on" class="eye-on-input" name="need_to_eye_on"{textarea_disabled}>{escape(member["need_to_eye_on"])}</textarea>
             </div>
             <p><strong>Team Member:</strong> {escape(member["name"])}</p>
             {''.join(week_sections)}
             <div class="tracker-actions">
                 <a class="button secondary" href="/members">Back to Members</a>
-                <button type="submit">Save Tracking Data</button>
+                {save_button}
             </div>
         </form>
     </section>
@@ -979,10 +1090,28 @@ class TeamTrackerHandler(BaseHTTPRequestHandler):
         path = unquote(parsed.path)
         query = parse_qs(parsed.query)
 
+        if path == "/login":
+            self.send_html(login_page())
+            return
+        if path == "/logout":
+            self.send_html(
+                page("Logged Out", '<p><a href="/login">Log in again</a>.</p>', "You have been logged out.", refresh_to="/login"),
+                headers=[("Set-Cookie", clear_auth_cookie())],
+            )
+            return
+
+        role = role_from_headers(self.headers)
+        if not can_read(role):
+            self.send_html(login_page("Please log in to continue."), 401)
+            return
+
         if path == "/":
-            self.send_html(home_page())
+            self.send_html(home_page(can_write(role)))
         elif path == "/new":
-            self.send_html(new_member_page())
+            if not can_write(role):
+                self.send_html(page("Access Denied", "<p>You have read-only access.</p>", "Write access is required.", "error"), 403)
+            else:
+                self.send_html(new_member_page())
         elif path == "/members":
             self.send_html(members_page())
         elif path.startswith("/tracker/"):
@@ -990,7 +1119,7 @@ class TeamTrackerHandler(BaseHTTPRequestHandler):
             if member_id is None:
                 self.send_html(page("Error", "<p>Invalid member ID.</p>", "Error: Invalid member ID.", "error"), 400)
             else:
-                self.send_html(tracker_page(member_id, query.get("message", [""])[0]))
+                self.send_html(tracker_page(member_id, query.get("message", [""])[0], can_write(role)))
         else:
             self.send_html(page("Page Not Found", "<p>The requested page does not exist.</p>"), 404)
 
@@ -998,6 +1127,22 @@ class TeamTrackerHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
         form_data = self.read_form()
+
+        if path == "/login":
+            role = role_from_password(form_data.get("password", [""])[0])
+            if role:
+                self.send_html(
+                    page("Logged In", '<p><a href="/">Continue to tracker</a>.</p>', "Login successful.", refresh_to="/"),
+                    headers=[("Set-Cookie", make_auth_cookie(role))],
+                )
+            else:
+                self.send_html(login_page("Invalid password. Please try again."), 401)
+            return
+
+        role = role_from_headers(self.headers)
+        if not can_write(role):
+            self.send_html(page("Access Denied", "<p>You have read-only access.</p>", "Write access is required.", "error"), 403)
+            return
 
         if path == "/new":
             saved = add_member(form_data.get("name", [""])[0])
@@ -1024,7 +1169,7 @@ class TeamTrackerHandler(BaseHTTPRequestHandler):
                 self.send_html(page("Error", "<p>Invalid member ID.</p>", "Error: Invalid member ID.", "error"), 400)
             else:
                 save_tracking(member_id, form_data)
-                self.send_html(tracker_page(member_id, "Tracking data has been saved."))
+                self.send_html(tracker_page(member_id, "Tracking data has been saved.", True))
         else:
             self.send_html(page("Page Not Found", "<p>The requested page does not exist.</p>"), 404)
 
@@ -1033,10 +1178,14 @@ class TeamTrackerHandler(BaseHTTPRequestHandler):
         raw_body = self.rfile.read(content_length).decode("utf-8")
         return parse_qs(raw_body, keep_blank_values=True)
 
-    def send_html(self, body: bytes, status: int = 200) -> None:
+    def send_html(
+        self, body: bytes, status: int = 200, headers: list[tuple[str, str]] | None = None
+    ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        for key, value in headers or []:
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(body)
 
