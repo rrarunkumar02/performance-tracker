@@ -148,6 +148,27 @@ REPORT_OPTIONS = [
 ]
 REPORT_WEEK_BY_KEY = {key: week_name for key, _title, week_name in REPORT_OPTIONS}
 REPORT_TITLE_BY_KEY = {key: title for key, title, _week_name in REPORT_OPTIONS}
+SPECIAL_REPORT_TITLE_BY_KEY = {
+    "individual-summary": "Individual Summary",
+    "individual-timing": "Individual Timing Report",
+}
+
+WEEK_DISPLAY_NAMES = {
+    "Week 0": "Week-1 (0-9 hours, 3 shift)",
+    "Week 1": "Week-2 (9-18 hours, 6 shift)",
+    "Week 2": "Week-3 (18-27 hours, 9 shift)",
+    "Week 3": "Week-4 (27-36 hours, 12 shift)",
+    "Week 4": "Week-5 (36-45 hours, 15 shift)",
+    "Record Timing Values": "Record Timing Values",
+}
+REPORT_WEEK_DISPLAY_NAMES = {
+    "Week 0": "Week-1",
+    "Week 1": "Week-2",
+    "Week 2": "Week-3",
+    "Week 3": "Week-4",
+    "Week 4": "Week-5",
+    "Record Timing Values": "Record Timing",
+}
 
 
 NUMBER_VALUE_TASKS = {
@@ -1554,9 +1575,166 @@ def report_rows_for(
     return tasks, rows
 
 
+def selected_member_from_ids(selected_member_ids: list[int] | None) -> sqlite3.Row | None:
+    if not selected_member_ids:
+        return None
+    return get_member(int(selected_member_ids[0]))
+
+
+def member_select_options(members: list[sqlite3.Row], selected_member_id: int | None = None) -> str:
+    options = ['<option value="">Select team member</option>']
+    for member in members:
+        selected = " selected" if selected_member_id == int(member["member_id"]) else ""
+        options.append(
+            f'<option value="{escape(member["member_id"])}"{selected}>{escape(member["name"])}</option>'
+        )
+    return "".join(options)
+
+
+def tracker_rows_for_member(member_id: int) -> list[dict[str, str]]:
+    tracking = get_tracking(member_id)
+    rows = []
+    for week in WEEKS:
+        for task in week["tasks"]:
+            record = tracking.get((week["name"], task))
+            if record is None:
+                continue
+            value = str(record["value_status"] or "").strip()
+            conducted_by = str(record["conducted_by"] or "").strip()
+            updated_at = str(record["updated_at"] or "").strip()
+            rows.append(
+                {
+                    "week": REPORT_WEEK_DISPLAY_NAMES.get(week["name"], week["name"]),
+                    "task": task,
+                    "value": value,
+                    "conducted_by": conducted_by if value else "",
+                    "updated_at": display_date(updated_at) if value else "",
+                }
+            )
+    return rows
+
+
+def timing_rows_for_member(member_id: int) -> list[dict[str, str]]:
+    timing_week_names = ["Week 1", "Week 2", "Week 3", "Week 4", "Record Timing Values"]
+    timing_tasks = [
+        "Delivery time (weekly-mm:ss)",
+        "Cut time (2 pizza-ss:ms)",
+        "Saucing time (25 pizza-mm:ss)",
+        "Cut bench setup time (mm:ss)",
+        "Weekly Progress",
+        "Overall Score",
+        "Total Score",
+    ]
+    tracking = get_tracking(member_id)
+    rows = []
+    for week_name in timing_week_names:
+        row = {"week": REPORT_WEEK_DISPLAY_NAMES.get(week_name, week_name)}
+        for task in timing_tasks:
+            record = tracking.get((week_name, task))
+            row[task] = str(record["value_status"] or "").strip() if record else ""
+        rows.append(row)
+    return rows
+
+
+def individual_summary_csv(member: sqlite3.Row) -> tuple[str, bytes]:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Team Member", str(member["name"] or "")])
+    writer.writerow(["Member ID", str(member["member_id"] or "")])
+    writer.writerow(["Created", str(member["created_at"] or "")])
+    writer.writerow(["Internal Review Notes", str(member["need_to_eye_on"] or "")])
+    writer.writerow([])
+    writer.writerow(["Week", "Task", "Value / Status", "Conducted By", "Updated Date"])
+    for row in tracker_rows_for_member(int(member["member_id"])):
+        writer.writerow([row["week"], row["task"], row["value"], row["conducted_by"], row["updated_at"]])
+    filename = f'individual-summary-{str(member["name"] or "member").replace(" ", "-")}.csv'
+    return filename, output.getvalue().encode("utf-8")
+
+
+def individual_timing_csv(member: sqlite3.Row) -> tuple[str, bytes]:
+    columns = [
+        "Week",
+        "Delivery time (weekly-mm:ss)",
+        "Cut time (2 pizza-ss:ms)",
+        "Saucing time (25 pizza-mm:ss)",
+        "Cut bench setup time (mm:ss)",
+        "Weekly Progress",
+        "Overall Score",
+        "Total Score",
+    ]
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Team Member", str(member["name"] or "")])
+    writer.writerow([])
+    writer.writerow(columns)
+    for row in timing_rows_for_member(int(member["member_id"])):
+        writer.writerow([row.get(column.lower(), "") if column == "Week" else row.get(column, "") for column in columns])
+    filename = f'individual-timing-{str(member["name"] or "member").replace(" ", "-")}.csv'
+    return filename, output.getvalue().encode("utf-8")
+
+
+def pdf_escape(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def simple_pdf(title: str, lines: list[str]) -> bytes:
+    content_lines = ["BT", "/F1 16 Tf", "50 790 Td", f"({pdf_escape(title)}) Tj", "/F1 9 Tf", "0 -24 Td"]
+    for line in lines:
+        safe_line = line[:110]
+        content_lines.append(f"({pdf_escape(safe_line)}) Tj")
+        content_lines.append("0 -14 Td")
+    content_lines.append("ET")
+    stream = "\n".join(content_lines).encode("latin-1", errors="replace")
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream",
+    ]
+    pdf = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for index, obj in enumerate(objects, 1):
+        offsets.append(len(pdf))
+        pdf.extend(f"{index} 0 obj\n".encode("ascii"))
+        pdf.extend(obj)
+        pdf.extend(b"\nendobj\n")
+    xref_start = len(pdf)
+    pdf.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    pdf.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        pdf.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    pdf.extend(
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_start}\n%%EOF\n".encode("ascii")
+    )
+    return bytes(pdf)
+
+
+def individual_timing_pdf(member: sqlite3.Row) -> tuple[str, bytes]:
+    lines = [f"Team Member: {member['name']}", ""]
+    for row in timing_rows_for_member(int(member["member_id"])):
+        lines.append(str(row["week"]))
+        lines.append(f"  Delivery: {row.get('Delivery time (weekly-mm:ss)', '')}")
+        lines.append(f"  Cut: {row.get('Cut time (2 pizza-ss:ms)', '')}")
+        lines.append(f"  Saucing: {row.get('Saucing time (25 pizza-mm:ss)', '')}")
+        lines.append(f"  Cut bench setup: {row.get('Cut bench setup time (mm:ss)', '')}")
+        progress = row.get("Weekly Progress") or row.get("Overall Score") or row.get("Total Score")
+        if progress:
+            lines.append(f"  Score: {progress}")
+        lines.append("")
+    filename = f'individual-timing-{str(member["name"] or "member").replace(" ", "-")}.pdf'
+    return filename, simple_pdf("Individual Timing Report", lines)
+
+
 def report_csv(
     report_key: str, selected_member_ids: list[int] | None = None, sort_dir: str = "asc"
 ) -> tuple[str, bytes]:
+    member = selected_member_from_ids(selected_member_ids)
+    if report_key == "individual-summary" and member is not None:
+        return individual_summary_csv(member)
+    if report_key == "individual-timing" and member is not None:
+        return individual_timing_csv(member)
+
     tasks, rows = report_rows_for(report_key, selected_member_ids, sort_dir)
     output = io.StringIO()
     writer = csv.writer(output)
@@ -1569,6 +1747,15 @@ def report_csv(
     return filename, output.getvalue().encode("utf-8")
 
 
+def report_pdf(
+    report_key: str, selected_member_ids: list[int] | None = None, sort_dir: str = "asc"
+) -> tuple[str, bytes]:
+    member = selected_member_from_ids(selected_member_ids)
+    if report_key == "individual-timing" and member is not None:
+        return individual_timing_pdf(member)
+    return f"{report_key or 'report'}.pdf", simple_pdf("Report", ["No PDF report is available for this selection."])
+
+
 def report_page(
     report_key: str = "",
     selected_member_ids: list[int] | None = None,
@@ -1579,6 +1766,10 @@ def report_page(
             f'<a href="/report/{escape(key)}">{escape(title)}</a>'
             for key, title, _week_name in REPORT_OPTIONS
         )
+        cards += "".join(
+            f'<a href="/report/{escape(key)}">{escape(title)}</a>'
+            for key, title in SPECIAL_REPORT_TITLE_BY_KEY.items()
+        )
         body = f"""
         <section class="panel">
             <p>Select the report you want to view.</p>
@@ -1586,6 +1777,111 @@ def report_page(
         </section>
         """
         return page("Reports", body)
+
+    if report_key in SPECIAL_REPORT_TITLE_BY_KEY:
+        members = get_members()
+        selected_member = selected_member_from_ids(selected_member_ids)
+        selected_member_id = int(selected_member["member_id"]) if selected_member is not None else None
+        select_options = member_select_options(members, selected_member_id)
+        report_title = SPECIAL_REPORT_TITLE_BY_KEY[report_key]
+        export_links = ""
+        report_body = '<div class="empty">Select a team member, then click View Report.</div>'
+
+        if selected_member is not None:
+            export_href = f"/report/{escape(report_key)}/export?member_id={escape(selected_member_id)}"
+            export_links = (
+                f'<a class="button secondary" href="{export_href}" download="{escape(report_key)}.csv">Export CSV</a>'
+                f'<a class="button secondary" href="{export_href}&view=1" target="_blank">Open CSV</a>'
+            )
+            if report_key == "individual-timing":
+                export_links += f'<a class="button secondary" href="{export_href}&format=pdf" target="_blank">Export PDF</a>'
+                rows = []
+                for row in timing_rows_for_member(int(selected_member["member_id"])):
+                    rows.append(
+                        f"""
+                        <tr>
+                            <td class="task">{escape(row['week'])}</td>
+                            <td>{escape(row.get('Delivery time (weekly-mm:ss)', ''))}</td>
+                            <td>{escape(row.get('Cut time (2 pizza-ss:ms)', ''))}</td>
+                            <td>{escape(row.get('Saucing time (25 pizza-mm:ss)', ''))}</td>
+                            <td>{escape(row.get('Cut bench setup time (mm:ss)', ''))}</td>
+                            <td>{escape(row.get('Weekly Progress') or row.get('Overall Score') or row.get('Total Score') or '')}</td>
+                        </tr>
+                        """
+                    )
+                report_body = f"""
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Week</th>
+                                <th>Delivery</th>
+                                <th>Cut</th>
+                                <th>Saucing</th>
+                                <th>Cut Bench Setup</th>
+                                <th>Score</th>
+                            </tr>
+                        </thead>
+                        <tbody>{''.join(rows)}</tbody>
+                    </table>
+                </div>
+                """
+            else:
+                rows = []
+                for row in tracker_rows_for_member(int(selected_member["member_id"])):
+                    rows.append(
+                        f"""
+                        <tr>
+                            <td>{escape(row['week'])}</td>
+                            <td class="task">{task_label_html(row['task'])}</td>
+                            <td>{escape(row['value'])}</td>
+                            <td>{escape(row['conducted_by'])}</td>
+                            <td>{escape(row['updated_at'])}</td>
+                        </tr>
+                        """
+                    )
+                report_body = f"""
+                <p><strong>Team Member:</strong> {escape(selected_member['name'])}</p>
+                <p><strong>Internal Review Notes:</strong> {escape(selected_member['need_to_eye_on'])}</p>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Week</th>
+                                <th>Task</th>
+                                <th>Value / Status</th>
+                                <th>Conducted By</th>
+                                <th>Updated Date</th>
+                            </tr>
+                        </thead>
+                        <tbody>{''.join(rows)}</tbody>
+                    </table>
+                </div>
+                """
+
+        body = f"""
+        <section class="panel">
+            <form method="get" action="/report/{escape(report_key)}">
+                <h2>Select Team Member</h2>
+                <div class="form-row" style="margin-top: 16px;">
+                    <div>
+                        <label for="member_id">Team Member</label>
+                        <select id="member_id" name="member_id">{select_options}</select>
+                    </div>
+                    <button type="submit">View Report</button>
+                </div>
+                <div class="tracker-actions">
+                    <a class="button secondary" href="/report">Back to Reports</a>
+                </div>
+            </form>
+        </section>
+        <section class="panel" style="margin-top: 18px;">
+            <h2>{escape(report_title)}</h2>
+            <div class="tracker-actions">{export_links}</div>
+            {report_body}
+        </section>
+        """
+        return page(report_title, body)
 
     week_name = REPORT_WEEK_BY_KEY.get(report_key)
     if week_name is None:
@@ -1737,14 +2033,7 @@ def tracker_page(member_id: int, message: str = "", can_write_access: bool = Tru
                 """
             )
 
-        week_heading_map = {
-            "Week 0": "Week-1 (0-9 hours, 3 shift)",
-            "Week 1": "Week-2 (9-18 hours, 6 shift)",
-            "Week 2": "Week-3 (18-27 hours, 9 shift)",
-            "Week 3": "Week-4 (27-36 hours, 12 shift)",
-            "Week 4": "Week-5 (36-45 hours, 15 shift)",
-        }
-        week_heading = week_heading_map.get(week["name"], week["name"])
+        week_heading = WEEK_DISPLAY_NAMES.get(week["name"], week["name"])
         week_sections.append(
             f"""
             <h2>{escape(week_heading)}</h2>
@@ -1857,18 +2146,30 @@ class TeamTrackerHandler(BaseHTTPRequestHandler):
                     pass
             sort_dir = query.get("sort_dir", ["asc"])[0]
             if is_export:
-                filename, body = report_csv(report_key, selected_ids, sort_dir)
-                if query.get("view", [""])[0] == "1":
-                    self.send_bytes(body, "text/plain; charset=utf-8")
-                else:
+                export_format = query.get("format", ["csv"])[0]
+                if export_format == "pdf":
+                    filename, body = report_pdf(report_key, selected_ids, sort_dir)
                     self.send_bytes(
                         body,
-                        "text/csv; charset=utf-8",
+                        "application/pdf",
                         headers=[
                             ("Content-Disposition", f'attachment; filename="{filename}"'),
                             ("Cache-Control", "no-store"),
                         ],
                     )
+                else:
+                    filename, body = report_csv(report_key, selected_ids, sort_dir)
+                    if query.get("view", [""])[0] == "1":
+                        self.send_bytes(body, "text/plain; charset=utf-8")
+                    else:
+                        self.send_bytes(
+                            body,
+                            "text/csv; charset=utf-8",
+                            headers=[
+                                ("Content-Disposition", f'attachment; filename="{filename}"'),
+                                ("Cache-Control", "no-store"),
+                            ],
+                        )
             else:
                 self.send_html(report_page(report_key, selected_ids, sort_dir))
         elif path.startswith("/tracker/"):

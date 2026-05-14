@@ -29,6 +29,7 @@ from app import (
     page,
     report_page,
     report_csv,
+    report_pdf,
     role_from_headers,
     login_identity_from_code,
     master_identity_from_password,
@@ -93,18 +94,30 @@ class handler(BaseHTTPRequestHandler):
                     pass
             sort_dir = query.get("sort_dir", ["asc"])[0]
             if is_export:
-                filename, body = report_csv(report_key, selected_ids, sort_dir)
-                if query.get("view", [""])[0] == "1":
-                    self.send_bytes(body, "text/plain; charset=utf-8")
-                else:
+                export_format = query.get("format", ["csv"])[0]
+                if export_format == "pdf":
+                    filename, body = report_pdf(report_key, selected_ids, sort_dir)
                     self.send_bytes(
                         body,
-                        "text/csv; charset=utf-8",
+                        "application/pdf",
                         headers=[
                             ("Content-Disposition", f'attachment; filename="{filename}"'),
                             ("Cache-Control", "no-store"),
                         ],
                     )
+                else:
+                    filename, body = report_csv(report_key, selected_ids, sort_dir)
+                    if query.get("view", [""])[0] == "1":
+                        self.send_bytes(body, "text/plain; charset=utf-8")
+                    else:
+                        self.send_bytes(
+                            body,
+                            "text/csv; charset=utf-8",
+                            headers=[
+                                ("Content-Disposition", f'attachment; filename="{filename}"'),
+                                ("Cache-Control", "no-store"),
+                            ],
+                        )
             else:
                 self.send_html(report_page(report_key, selected_ids, sort_dir))
         elif path.startswith("/tracker/"):
