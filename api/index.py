@@ -11,8 +11,13 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app import (
+    access_page,
+    add_access_user,
+    delete_access_user,
+    delete_member,
     add_member,
     can_read,
+    can_manage_access,
     can_write,
     clear_auth_cookie,
     get_member,
@@ -22,9 +27,14 @@ from app import (
     members_page,
     new_member_page,
     page,
+    report_page,
+    report_csv,
     role_from_headers,
-    role_from_password,
+    login_identity_from_code,
+    master_identity_from_password,
+    master_login_page,
     save_tracking,
+    user_name_from_headers,
     tracker_page,
 )
 
@@ -38,6 +48,9 @@ class handler(BaseHTTPRequestHandler):
         if path == "/login":
             self.send_html(login_page())
             return
+        if path == "/master":
+            self.send_html(master_login_page())
+            return
         if path == "/logout":
             self.send_html(
                 page("Logged Out", '<p><a href="/login">Log in again</a>.</p>', "You have been logged out.", refresh_to="/login"),
@@ -46,6 +59,13 @@ class handler(BaseHTTPRequestHandler):
             return
 
         role = role_from_headers(self.headers)
+        if path == "/access":
+            if not can_manage_access(role):
+                self.send_html(master_login_page("Please enter the master password to manage access codes."), 401)
+            else:
+                self.send_html(access_page())
+            return
+
         if not can_read(role):
             self.send_html(login_page("Please log in to continue."), 401)
             return
@@ -59,6 +79,34 @@ class handler(BaseHTTPRequestHandler):
                 self.send_html(new_member_page())
         elif path == "/members":
             self.send_html(members_page())
+        elif path == "/report":
+            self.send_html(report_page())
+        elif path.startswith("/report/"):
+            path_parts = path.strip("/").split("/")
+            is_export = len(path_parts) == 3 and path_parts[0] == "report" and path_parts[2] == "export"
+            report_key = path_parts[1] if is_export else path.rstrip("/").split("/")[-1]
+            selected_ids = []
+            for value in query.get("member_id", []):
+                try:
+                    selected_ids.append(int(value))
+                except ValueError:
+                    pass
+            sort_dir = query.get("sort_dir", ["asc"])[0]
+            if is_export:
+                filename, body = report_csv(report_key, selected_ids, sort_dir)
+                if query.get("view", [""])[0] == "1":
+                    self.send_bytes(body, "text/plain; charset=utf-8")
+                else:
+                    self.send_bytes(
+                        body,
+                        "text/csv; charset=utf-8",
+                        headers=[
+                            ("Content-Disposition", f'attachment; filename="{filename}"'),
+                            ("Cache-Control", "no-store"),
+                        ],
+                    )
+            else:
+                self.send_html(report_page(report_key, selected_ids, sort_dir))
         elif path.startswith("/tracker/"):
             member_id = self.member_id_from_path(path)
             if member_id is None:
@@ -77,17 +125,61 @@ class handler(BaseHTTPRequestHandler):
         form_data = self.read_form()
 
         if path == "/login":
-            role = role_from_password(form_data.get("password", [""])[0])
-            if role:
+            identity = login_identity_from_code(form_data.get("password", [""])[0])
+            if identity:
                 self.send_html(
                     page("Logged In", '<p><a href="/">Continue to tracker</a>.</p>', "Login successful.", refresh_to="/"),
-                    headers=[("Set-Cookie", make_auth_cookie(role))],
+                    headers=[("Set-Cookie", make_auth_cookie(identity["role"], identity["name"]))],
                 )
             else:
-                self.send_html(login_page("Invalid password. Please try again."), 401)
+                self.send_html(login_page("Invalid access code. Please try again."), 401)
+            return
+        if path == "/master":
+            identity = master_identity_from_password(form_data.get("password", [""])[0])
+            if identity:
+                self.send_html(
+                    page("Master Login", '<p><a href="/access">Continue to access setup</a>.</p>', "Master login successful.", refresh_to="/access"),
+                    headers=[("Set-Cookie", make_auth_cookie(identity["role"], identity["name"]))],
+                )
+            else:
+                self.send_html(master_login_page("Invalid master password. Please try again."), 401)
             return
 
         role = role_from_headers(self.headers)
+        if path == "/access":
+            if not can_manage_access(role):
+                self.send_html(master_login_page("Please enter the master password to manage access codes."), 401)
+                return
+            action = form_data.get("action", ["add_access_user"])[0]
+            if action == "delete_access_user":
+                try:
+                    delete_access_user(int(form_data.get("user_id", ["0"])[0]))
+                    self.send_html(access_page("Access person has been deleted."))
+                except ValueError:
+                    self.send_html(access_page("Error: Access person was not deleted.", "error"), 400)
+                return
+            if action == "delete_member":
+                try:
+                    delete_member(int(form_data.get("member_id", ["0"])[0]))
+                    self.send_html(access_page("Team member has been deleted."))
+                except ValueError:
+                    self.send_html(access_page("Error: Team member was not deleted.", "error"), 400)
+                return
+
+            saved = add_access_user(
+                form_data.get("name", [""])[0],
+                form_data.get("access_code", [""])[0],
+                form_data.get("role", ["write"])[0],
+            )
+            if saved:
+                self.send_html(access_page("Access code has been saved."))
+            else:
+                self.send_html(
+                    access_page("Error: This access code is already being used, or the name/code is empty.", "error"),
+                    400,
+                )
+            return
+
         if not can_write(role):
             self.send_html(page("Access Denied", "<p>You have read-only access.</p>", "Write access is required.", "error"), 403)
             return
@@ -119,7 +211,7 @@ class handler(BaseHTTPRequestHandler):
                     400,
                 )
             else:
-                save_tracking(member_id, form_data)
+                save_tracking(member_id, form_data, user_name_from_headers(self.headers))
                 self.send_html(tracker_page(member_id, "Tracking data has been saved.", True))
         else:
             self.send_html(page("Page Not Found", "<p>The requested page does not exist.</p>"), 404)
@@ -132,8 +224,17 @@ class handler(BaseHTTPRequestHandler):
     def send_html(
         self, body: bytes, status: int = 200, headers: list[tuple[str, str]] | None = None
     ) -> None:
+        self.send_bytes(body, "text/html; charset=utf-8", status, headers)
+
+    def send_bytes(
+        self,
+        body: bytes,
+        content_type: str,
+        status: int = 200,
+        headers: list[tuple[str, str]] | None = None,
+    ) -> None:
         self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         for key, value in headers or []:
             self.send_header(key, value)
